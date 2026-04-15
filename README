@@ -15,8 +15,8 @@
 
  🚀 Quick start
 
-git clone https://github.com/yourname/hotmail-vaccuum.git
-cd hotmail-vaccuum
+git clone https://github.com/tc4dy/Hotmail-Vaccuum.git
+cd Hotmail-Vaccuum
 pip install -r requirements.txt
 
 Place your combos in combos.txt (format: email:password).
