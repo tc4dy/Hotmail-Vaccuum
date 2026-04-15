@@ -1,8 +1,8 @@
-# 🔥 Hotmail VACCUUM
+🔥 Hotmail VACCUUM
 
-> *Dynamic, fast & friendly Hotmail/Outlook account checker*
+> Dynamic, fast & friendly Hotmail/Outlook account checker
 
-✨ **Features**
+✨ Features
 - 🧠 Fully dynamic – grabs fresh PPFT tokens every time
 - 🚀 Multi‑threaded (up to 500 threads)
 - 🛡️ Optional delay to avoid IP bans
@@ -13,9 +13,8 @@
 - 🎨 Vibrant, eye‑friendly CLI
 - 🤖 Discord webhook integration
 
-## 🚀 Quick start
+ 🚀 Quick start
 
-```bash
 git clone https://github.com/yourname/hotmail-vaccuum.git
 cd hotmail-vaccuum
 pip install -r requirements.txt
@@ -23,7 +22,6 @@ pip install -r requirements.txt
 Place your combos in combos.txt (format: email:password).
 Then run:
 
-bash;
 python main.py
 
 📂 Output
