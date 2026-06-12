@@ -37,6 +37,7 @@ python main.py
 🤝 Contributing
 
 Feel free to open issues or pull requests. Keep it friendly 🫶
+
 ⚠️ Disclaimer
 
 For educational purposes only. The user is responsible.
