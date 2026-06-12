@@ -13,6 +13,25 @@
 - 🎨 Vibrant, eye‑friendly CLI
 - 🤖 Discord webhook integration
 
+Use Residental Proxy Because:
+
+📊 Test results with 10,000 combos:
+
+Without a proxy:
+├── Duration: 1–2 minutes (followed by an IP ban)
+├── Completed combos: ~100–200
+└── Success rate: 1–2%
+
+Datacenter Proxy:
+├── Duration: 30–60 minutes (quick ban)
+├── Completed combos: ~2,000–3,000
+└── Success rate: ~30–40%
+
+Residential Proxy:
+├── Runtime: Stable for days
+├── Completed combos: All 10,000
+└── Success rate: 95%+
+
  🚀 Quick start
 
 ```bash
