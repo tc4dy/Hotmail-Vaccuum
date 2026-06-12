@@ -15,15 +15,17 @@
 
  🚀 Quick start
 
+```bash
 git clone https://github.com/tc4dy/Hotmail-Vaccuum.git
 cd Hotmail-Vaccuum
 pip install -r requirements.txt
+```
 
 Place your combos in combos.txt (format: email:password).
 Then run:
-
+```bash
 python main.py
-
+```
 📂 Output
 
     hits.txt – working accounts (no 2FA)
