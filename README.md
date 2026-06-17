@@ -1,3 +1,7 @@
+# ⚠️ Disclaimer
+
+For educational purposes only. The user is responsible.
+
 🔥 Hotmail VACCUUM
 
 > Dynamic, fast & friendly Hotmail/Outlook account checker
@@ -55,12 +59,6 @@ python main.py
 
     report.txt – full statistics
 
-🤝 Contributing
+🤝 Only Educational.
 
-Feel free to open issues or pull requests. Keep it friendly 🫶
 
-⚠️ Disclaimer
-
-For educational purposes only. The user is responsible.
-
-Made with ☕ by @tc4dy
