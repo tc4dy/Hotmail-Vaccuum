@@ -24,7 +24,8 @@ Use Residental Proxy Because:
 Without a proxy:
 ├── Duration: 1–2 minutes (followed by an IP ban)
 ├── Completed combos: ~100–200
-└── Success rate: 1–2%
+└── Success rate: 1–2% 
+(You can overcome this with Tor Router and Nipe Automations.)
 
 Datacenter Proxy:
 ├── Duration: 30–60 minutes (quick ban)
