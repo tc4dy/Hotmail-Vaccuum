@@ -1,25 +1,25 @@
-# ⚠️ Disclaimer
+# [!] Disclaimer
 
 For educational purposes only. The user is responsible.
 
-🔥 Hotmail VACCUUM
+# Hotmail VACCUUM
 
 > Dynamic, fast & friendly Hotmail/Outlook account checker
 
-✨ Features
-- 🧠 Fully dynamic – grabs fresh PPFT tokens every time
-- 🚀 Multi‑threaded (up to 500 threads)
-- 🛡️ Optional delay to avoid IP bans
-- 🌍 Proxy support (HTTP/HTTPS/SOCKS4/SOCKS5)
-- 🔁 Resume – continues where you left off
-- 📁 Saves valid, 2FA & invalid combos
-- 📊 Generates a neat report with stats
-- 🎨 Vibrant, eye‑friendly CLI
-- 🤖 Discord webhook integration
+[</>[ Features
+- [+] Fully dynamic – grabs fresh PPFT tokens every time
+- [+] Multi‑threaded (up to 500 threads)
+- [+] Optional delay to avoid IP bans
+- [+] Proxy support (HTTP/HTTPS/SOCKS4/SOCKS5)
+- [+] Resume – continues where you left off
+- [+] Saves valid, 2FA & invalid combos
+- [+] Generates a neat report with stats
+- [+] Vibrant, eye‑friendly CLI
+- [+] Discord webhook integration
 
 Use Residental Proxy Because:
 
-📊 Test results with 10,000 combos:
+> Test results with 10,000 combos:
 
 Without a proxy:
 ├── Duration: 1–2 minutes (followed by an IP ban)
@@ -38,7 +38,7 @@ Residential Proxy:
 ├── Completed combos: All 10,000
 └── Success rate: 95%+
 
- 🚀 Quick start
+Quick start
 
 ```bash
 git clone https://github.com/tc4dy/Hotmail-Vaccuum.git
@@ -51,7 +51,8 @@ Then run:
 ```bash
 python main.py
 ```
-📂 Output
+
+## Output
 
     hits.txt – working accounts (no 2FA)
 
@@ -61,6 +62,6 @@ python main.py
 
     report.txt – full statistics
 
-🤝 Only Educational.
+Only Educational.
 
 
